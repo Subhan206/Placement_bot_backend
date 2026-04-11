@@ -5,3 +5,4 @@ langchain-core
 mediapipe
 box2d-py
 python-multipart
+gtts
