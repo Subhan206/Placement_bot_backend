@@ -7,3 +7,5 @@ box2d-py
 python-multipart
 gtts
 python-dotenv
+pydantic
+groq
