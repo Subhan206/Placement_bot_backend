@@ -5,7 +5,7 @@ annotated-types==0.7.0
 anyio==4.11.0
 attrs==25.4.0
 beautifulsoup4==4.14.0
-box2d-py==2.3.8
+box2d-py
 cachetools==7.0.5
 certifi==2025.8.3
 cffi==2.0.0
@@ -50,7 +50,7 @@ langsmith==0.4.39
 llvmlite==0.45.0
 MarkupSafe==3.0.3
 matplotlib==3.10.8
-mediapipe==0.10.20
+mediapipe
 ml_dtypes==0.5.4
 more-itertools==10.8.0
 MouseInfo==0.1.3
