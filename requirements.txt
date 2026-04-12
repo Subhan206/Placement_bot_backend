@@ -5,4 +5,4 @@ gtts
 python-dotenv
 pydantic
 python-multipart
-pinecone-client
+pinecone
