@@ -9,3 +9,5 @@ gtts
 python-dotenv
 pydantic
 groq
+pinecone
+sentence-transformers
