@@ -57,92 +57,6 @@ YOUR SECURITY GUARDRAILS:
 3. NO HALLUCINATIONS: If the provided context does not contain the answer, do not guess using your internal knowledge. Say: "I don't have that exact information on hand right now, please check the official portal."
 """
 
-
-# --- TM2 PINE CONE RAG SETUP (1024d INFERENCE UPGRADED) ---
-def detect_query_intent(query: str):
-    q = query.lower()
-    if any(w in q for w in ["faculty", "professor", "teacher", "staff", "who teaches", "hod", "head of department"]):
-        if any(w in q for w in ["list", "all", "who are", "members", "names"]): return "faculty", "list"
-        return "faculty", "profile"
-    if any(w in q for w in ["hostel fee", "room fee", "fee structure", "room type", "room cost", "single ac", "double", "hostel charges", "hostel room"]): return "hostel", "table"
-    if any(w in q for w in ["hostel", "accommodation", "room", "mess", "dining", "stay", "dormitory", "warden", "facilities"]): return "hostel", None
-    if any(w in q for w in ["course", "program", "btech", "mtech", "degree", "curriculum", "specialization", "admission", "eligibility"]): return "programs", None
-    if any(w in q for w in ["fee", "tuition", "scholarship", "loan", "cost", "payment", "financial"]): return "admissions", None
-    if any(w in q for w in ["event", "news", "conference", "workshop", "seminar"]): return "news", None
-    return None, None
-
-EXPANSIONS = {
-    "cs faculty":          "Computer Science faculty members list MIT Bengaluru names professors",
-    "cse faculty":         "Computer Science Engineering faculty members MIT Bengaluru",
-    "hostel fee":          "hostel room fee structure charges 2025 MIT Bengaluru annual",
-    "hostel room":         "hostel room types single double AC non-AC fee MIT Bengaluru",
-    "cs department":       "Computer Science department MIT Bengaluru faculty programs",
-    "list all faculty":    "Computer Science faculty members list names MIT Bengaluru",
-    "who are the faculty": "faculty members list names department MIT Bengaluru professors",
-}
-
-def expand_query(query: str) -> str:
-    q_lower = query.lower()
-    for shorthand, expansion in EXPANSIONS.items():
-        if shorthand in q_lower: return expansion
-    return query
-
-def search_campus_data(user_query: str, top_k: int = 3) -> str:
-    pc = resources.get("pc")
-    index = resources.get("index")
-
-    if not pc or not index:
-        return "System initializing."
-
-    expanded = expand_query(user_query)
-    
-    # NEW FIX: Use Pinecone Inference API to get the correct 1024d vector
-    try:
-        embedding_response = pc.inference.embed(
-            model="llama-text-embed-v2",
-            inputs=[expanded],
-            parameters={"input_type": "query"}
-        )
-        # FIX: Access the values from the first item in the inference list
-        query_vec = embedding_response[0].values
-    except Exception as e:
-        print(f"Embedding failed: {e}")
-        return "No relevant information found in the MIT Bengaluru knowledge base."
-
-    category, preferred_subtype = detect_query_intent(user_query)
-
-    def run_query(filter_dict=None):
-        kwargs = {"vector": query_vec, "top_k": top_k, "include_metadata": True, "namespace": "default"}
-        if filter_dict: kwargs["filter"] = filter_dict
-        return index.query(**kwargs)
-
-    # Cascade Search
-    matches = []
-    if category and preferred_subtype:
-        matches = run_query({"category": {"$eq": category}, "subtype": {"$eq": preferred_subtype}}).get("matches", [])
-    if not matches and category:
-        matches = run_query({"category": {"$eq": category}}).get("matches", [])
-    if not matches:
-        matches = run_query().get("matches", [])
-
-    if not matches:
-        return "No relevant information found in the MIT Bengaluru knowledge base."
-
-    # De-duplicate and strip metadata for voice safety
-    seen_texts = set()
-    unique_matches = []
-    for m in matches:
-        text = m.get("metadata", {}).get("text", "")
-        sig = text[:200]
-        if sig not in seen_texts:
-            seen_texts.add(sig)
-            unique_matches.append(text) 
-
-    return "\n\n---\n\n".join(unique_matches)
-
-# ---------------------------------------------
-
-
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     try:
@@ -154,7 +68,7 @@ async def chat_endpoint(request: ChatRequest):
 
         # Step 2: THE FIREWALL
         if "No relevant information found" in context or "No results found" in context:
-            bot_text = "I don't have that specific data in my current database. Please check the official placement portal."
+            bot_text = "I don't have that exact information on hand right now, please check the official portal."
             
             communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
             audio_data = bytearray()
@@ -176,11 +90,7 @@ async def chat_endpoint(request: ChatRequest):
             temperature=0.2,
         )
         
-
-        # Fixed typo here!
-        # FIX: Added [0] to access the actual text content
-        bot_text = groq_response.choices[0].message.content
-
+        bot_text = groq_response.choices.message.content
         
         # Step 4: AUDIO GENERATION
         communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
