@@ -1,36 +1,32 @@
 import base64
 import os
 import io
-import edge_tts  # <-- Upgraded voice library
+import re
+import edge_tts 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
 from dotenv import load_dotenv
-from pinecone import Pinecone
+
+# IMPORT TM2's BRILLIANT SEARCH MODULE!
+from search import search_campus_data, _get_resources as warmup_search
 
 load_dotenv()
 
-# --- FAST BOOT LIFESPAN MANAGER (Pinecone Inference Upgraded) ---
 resources = {}
 
+# --- FAST BOOT LIFESPAN MANAGER ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize Pinecone Client
-    pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-    index_name = os.getenv("PINECONE_INDEX", "mit-bengaluru-v2")
-    
-    resources["pc"] = pc  # Store the client to use the Inference API
-    resources["index"] = pc.Index(index_name)
+    # Initialize Pinecone inside TM2's file so it's ready instantly
+    warmup_search()
     
     # Initialize Groq
     resources["groq"] = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    
-    print("ARIA: All resources warmed up and ready.")
-        
+    print("ARIA: API & Search modules warmed up and ready.")
     yield
-    # Clean up on shutdown
     resources.clear()
 
 app = FastAPI(lifespan=lifespan)
@@ -56,6 +52,7 @@ CRITICAL SECURITY GUARDRAILS:
 4. EXTREME BREVITY: Limit all responses to 1 or 2 short sentences (max 25 words). 
 5. NO FORMATTING: Plain text only. No asterisks, bolding, or symbols.
 """
+
 
 # --- TM2 PINE CONE RAG SETUP (1024d INFERENCE UPGRADED) ---
 def detect_query_intent(query: str):
@@ -140,17 +137,21 @@ def search_campus_data(user_query: str, top_k: int = 3) -> str:
     return "\n\n---\n\n".join(unique_matches)
 
 # ---------------------------------------------
+
+
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     try:
-        # Step 1: Get Context from TM2's RAG database
-        context = search_campus_data(request.query)
+        # Step 1: Call TM2's highly advanced search module
+        raw_context = search_campus_data(request.query)
 
-        # THE FIREWALL: Block out-of-bounds questions instantly
-        if "No relevant information found" in context:
+        # Step 1.5: THE VOICE FIX (Strip out TM2's [Cosine: %] tracking tags so AI doesn't read them)
+        context = re.sub(r"\[.*?\]", "", raw_context).strip()
+
+        # Step 2: THE FIREWALL
+        if "No relevant information found" in context or "No results found" in context:
             bot_text = "I don't have that specific data in my current database. Please check the official placement portal."
             
-            # FIREWALL AUDIO (edge-tts)
             communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
             audio_data = bytearray()
             async for chunk in communicate.stream():
@@ -158,12 +159,9 @@ async def chat_endpoint(request: ChatRequest):
                     audio_data.extend(chunk["data"])
             audio_base64 = base64.b64encode(audio_data).decode('utf-8')
             
-            return {
-                "text": bot_text,
-                "audio_base64": audio_base64
-            }
+            return {"text": bot_text, "audio_base64": audio_base64}
 
-        # Step 2: Call Groq (Only runs if the firewall is passed)
+        # Step 3: MAIN GENERATION
         groq_client = resources.get("groq")
         groq_response = groq_client.chat.completions.create(
             messages=[
@@ -174,11 +172,15 @@ async def chat_endpoint(request: ChatRequest):
             temperature=0.2,
         )
         
+
         # Fixed typo here!
         # FIX: Added [0] to access the actual text content
         bot_text = groq_response.choices[0].message.content
+
+        bot_text = groq_response.choices.message.content
+
         
-        # Step 3: Audio generation (EDGE-TTS NEURAL)
+        # Step 4: AUDIO GENERATION
         communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
         audio_data = bytearray()
         async for chunk in communicate.stream():
@@ -186,10 +188,7 @@ async def chat_endpoint(request: ChatRequest):
                 audio_data.extend(chunk["data"])
         audio_base64 = base64.b64encode(audio_data).decode('utf-8')
         
-        return {
-            "text": bot_text,
-            "audio_base64": audio_base64
-        }
+        return {"text": bot_text, "audio_base64": audio_base64}
 
     except Exception as e:
         print(f"ERROR: {str(e)}")
