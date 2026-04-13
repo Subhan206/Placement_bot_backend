@@ -89,7 +89,7 @@ async def chat_endpoint(request: ChatRequest):
             temperature=0.2,
         )
         
-        bot_text = groq_response.choices.message.content
+        bot_text = groq_response.choices[0].message.content
         
         # Step 4: AUDIO GENERATION
         communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
