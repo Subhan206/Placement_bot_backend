@@ -102,7 +102,8 @@ def search_campus_data(user_query: str, top_k: int = 3) -> str:
             inputs=[expanded],
             parameters={"input_type": "query"}
         )
-        query_vec = embedding_response.values
+        # FIX: Access the values from the first item in the inference list
+        query_vec = embedding_response[0].values
     except Exception as e:
         print(f"Embedding failed: {e}")
         return "No relevant information found in the MIT Bengaluru knowledge base."
@@ -174,7 +175,8 @@ async def chat_endpoint(request: ChatRequest):
         )
         
         # Fixed typo here!
-        bot_text = groq_response.choices.message.content
+        # FIX: Added [0] to access the actual text content
+        bot_text = groq_response.choices[0].message.content
         
         # Step 3: Audio generation (EDGE-TTS NEURAL)
         communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
