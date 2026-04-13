@@ -9,11 +9,11 @@ from groq import Groq
 from gtts import gTTS
 from dotenv import load_dotenv
 from pinecone import Pinecone
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
-# --- COLD START MITIGATION: LIFESPAN MANAGER ---
-# This runs BEFORE the server starts accepting requests
+# --- FAST BOOT LIFESPAN MANAGER (TM4's upgrade combined with TM2's logic) ---
 resources = {}
 
 @asynccontextmanager
@@ -26,12 +26,10 @@ async def lifespan(app: FastAPI):
     # Initialize Groq
     resources["groq"] = Groq(api_key=os.getenv("GROQ_API_KEY"))
     
-    # Optional: Send a tiny "warm-up" query to Pinecone
-    try:
-        resources["index"].query(vector=[0.0]*384, top_k=1)
-        print("ARIA: Resources warmed up and ready.")
-    except:
-        print("ARIA: Warm-up query failed, but initialization is complete.")
+    # Initialize TM2's Embedding Model here so it doesn't slow down the first chat!
+    print("ARIA: Loading Sentence Transformer Model...")
+    resources["model"] = SentenceTransformer("all-MiniLM-L6-v2")
+    print("ARIA: All resources warmed up and ready.")
         
     yield
     # Clean up on shutdown
@@ -50,34 +48,111 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     query: str
 
+# --- THE STRICT BOUNCER SYSTEM PROMPT ---
 SYSTEM_PROMPT = """You are ARIA, the official Placement Intelligence Voice AI for MIT Bengaluru. 
-Limit responses to 1 to 2 short sentences. No markdown, no formatting. Plain text only."""
 
-# --- UPDATED SEARCH FUNCTION ---
+CRITICAL SECURITY GUARDRAILS:
+1. BOUNDARY ENFORCEMENT: You are strictly forbidden from answering general knowledge questions, math problems, coding tutorials, or anything outside of MIT Bengaluru campus, placements, and courses.
+2. OUT-OF-BOUNDS PROTOCOL: If the user asks an unrelated question, you MUST reject it by saying exactly: "I am specifically trained for MIT Bengaluru campus queries. I cannot answer that."
+3. RAG STRICTNESS: If the provided context says "No relevant information found", DO NOT use your internal knowledge to guess. Say exactly: "I don't have that specific data right now."
+4. EXTREME BREVITY: Limit all responses to 1 or 2 short sentences (max 25 words). 
+5. NO FORMATTING: Plain text only. No asterisks, bolding, or symbols.
+"""
+
+# --- TM2 PINE CONE RAG SETUP (v2 UPGRADED) ---
+def detect_query_intent(query: str):
+    q = query.lower()
+    if any(w in q for w in ["faculty", "professor", "teacher", "staff", "who teaches", "hod", "head of department"]):
+        if any(w in q for w in ["list", "all", "who are", "members", "names"]): return "faculty", "list"
+        return "faculty", "profile"
+    if any(w in q for w in ["hostel fee", "room fee", "fee structure", "room type", "room cost", "single ac", "double", "hostel charges", "hostel room"]): return "hostel", "table"
+    if any(w in q for w in ["hostel", "accommodation", "room", "mess", "dining", "stay", "dormitory", "warden", "facilities"]): return "hostel", None
+    if any(w in q for w in ["course", "program", "btech", "mtech", "degree", "curriculum", "specialization", "admission", "eligibility"]): return "programs", None
+    if any(w in q for w in ["fee", "tuition", "scholarship", "loan", "cost", "payment", "financial"]): return "admissions", None
+    if any(w in q for w in ["event", "news", "conference", "workshop", "seminar"]): return "news", None
+    return None, None
+
+EXPANSIONS = {
+    "cs faculty":          "Computer Science faculty members list MIT Bengaluru names professors",
+    "cse faculty":         "Computer Science Engineering faculty members MIT Bengaluru",
+    "hostel fee":          "hostel room fee structure charges 2025 MIT Bengaluru annual",
+    "hostel room":         "hostel room types single double AC non-AC fee MIT Bengaluru",
+    "cs department":       "Computer Science department MIT Bengaluru faculty programs",
+    "list all faculty":    "Computer Science faculty members list names MIT Bengaluru",
+    "who are the faculty": "faculty members list names department MIT Bengaluru professors",
+}
+
+def expand_query(query: str) -> str:
+    q_lower = query.lower()
+    for shorthand, expansion in EXPANSIONS.items():
+        if shorthand in q_lower: return expansion
+    return query
+
 def search_campus_data(user_query: str, top_k: int = 3) -> str:
-    # Use the pre-warmed index from global resources
+    model = resources.get("model")
     index = resources.get("index")
-    if not index:
-        return "System initializing."
-        
-    try:
-        results = index.query(
-            vector=[0.0] * 384, 
-            top_k=top_k,
-            include_metadata=True
-        )
-        context_parts = [m["metadata"].get("text", "") for m in results.get("matches", [])]
-        return "\n\n".join(context_parts) if context_parts else "No specific context found."
-    except Exception as e:
-        print(f"RAG Error: {e}")
-        return "MIT Bengaluru placement and campus information."
 
+    if not model or not index:
+        return "System initializing."
+
+    expanded = expand_query(user_query)
+    
+    # We are actually embedding the user's question now, not sending zeroes!
+    query_vec = model.encode([expanded]).tolist()
+    category, preferred_subtype = detect_query_intent(user_query)
+
+    def run_query(filter_dict=None):
+        kwargs = {"vector": query_vec, "top_k": top_k, "include_metadata": True, "namespace": "default"}
+        if filter_dict: kwargs["filter"] = filter_dict
+        return index.query(**kwargs)
+
+    # Cascade Search
+    matches = []
+    if category and preferred_subtype:
+        matches = run_query({"category": {"$eq": category}, "subtype": {"$eq": preferred_subtype}}).get("matches", [])
+    if not matches and category:
+        matches = run_query({"category": {"$eq": category}}).get("matches", [])
+    if not matches:
+        matches = run_query().get("matches", [])
+
+    if not matches:
+        return "No relevant information found in the MIT Bengaluru knowledge base."
+
+    # De-duplicate and strip metadata for voice safety
+    seen_texts = set()
+    unique_matches = []
+    for m in matches:
+        text = m.get("metadata", {}).get("text", "")
+        sig = text[:200]
+        if sig not in seen_texts:
+            seen_texts.add(sig)
+            unique_matches.append(text) 
+
+    return "\n\n---\n\n".join(unique_matches)
+
+# ---------------------------------------------
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     try:
+        # Step 1: Get Context from TM2's RAG database
         context = search_campus_data(request.query)
-        groq_client = resources.get("groq")
 
+        # THE FIREWALL: Block out-of-bounds questions instantly
+        if "No relevant information found" in context:
+            bot_text = "I don't have that specific data in my current database. Please check the official placement portal."
+            
+            tts = gTTS(text=bot_text, lang='en', tld='co.in') 
+            audio_fp = io.BytesIO()
+            tts.write_to_fp(audio_fp)
+            audio_base64 = base64.b64encode(audio_fp.getvalue()).decode('utf-8')
+            
+            return {
+                "text": bot_text,
+                "audio_base64": audio_base64
+            }
+
+        # Step 2: Call Groq (Only runs if the firewall is passed)
+        groq_client = resources.get("groq")
         groq_response = groq_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -87,8 +162,9 @@ async def chat_endpoint(request: ChatRequest):
             temperature=0.2,
         )
         
-        bot_text = groq_response.choices[0].message.content
+        bot_text = groq_response.choices.message.content
         
+        # Step 3: Audio generation
         tts = gTTS(text=bot_text, lang='en', tld='co.in') 
         audio_fp = io.BytesIO()
         tts.write_to_fp(audio_fp)
