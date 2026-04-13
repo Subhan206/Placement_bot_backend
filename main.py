@@ -177,8 +177,6 @@ async def chat_endpoint(request: ChatRequest):
         # FIX: Added [0] to access the actual text content
         bot_text = groq_response.choices[0].message.content
 
-        bot_text = groq_response.choices.message.content
-
         
         # Step 4: AUDIO GENERATION
         communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
