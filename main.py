@@ -65,11 +65,10 @@ async def chat_endpoint(request: ChatRequest):
 
         # Step 1.5: THE VOICE FIX (Strip out TM2's [Cosine: %] tracking tags so AI doesn't read them)
         context = re.sub(r"\[.*?\]", "", raw_context).strip()
-
         # Step 2: THE FIREWALL
-        if "No relevant information found" in context or "No results found" in context:
+        if not context or "No relevant information found" in context:
             bot_text = "I don't have that exact information on hand right now, please check the official portal."
-            
+         
             communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
             audio_data = bytearray()
             async for chunk in communicate.stream():
