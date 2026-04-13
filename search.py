@@ -66,7 +66,8 @@ def embed_query(text: str, category: str = "", subtype: str = "") -> list:
         inputs=[prefix + text],
         parameters={"input_type": "query", "truncate": "END"}
     )
-    return result[0]["values"]
+    return result[0].values
+
 
 
 # ── Department detection ──────────────────────────────────────────────────────
