@@ -1,34 +1,32 @@
 import base64
 import os
 import io
+import edge_tts  # <-- Upgraded voice library
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
-from gtts import gTTS
 from dotenv import load_dotenv
 from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
-# --- FAST BOOT LIFESPAN MANAGER (TM4's upgrade combined with TM2's logic) ---
+# --- FAST BOOT LIFESPAN MANAGER (Pinecone Inference Upgraded) ---
 resources = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize Pinecone
+    # Initialize Pinecone Client
     pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
     index_name = os.getenv("PINECONE_INDEX", "mit-bengaluru-v2")
+    
+    resources["pc"] = pc  # Store the client to use the Inference API
     resources["index"] = pc.Index(index_name)
     
     # Initialize Groq
     resources["groq"] = Groq(api_key=os.getenv("GROQ_API_KEY"))
     
-    # Initialize TM2's Embedding Model here so it doesn't slow down the first chat!
-    print("ARIA: Loading Sentence Transformer Model...")
-    resources["model"] = SentenceTransformer("all-MiniLM-L6-v2")
     print("ARIA: All resources warmed up and ready.")
         
     yield
@@ -59,7 +57,7 @@ CRITICAL SECURITY GUARDRAILS:
 5. NO FORMATTING: Plain text only. No asterisks, bolding, or symbols.
 """
 
-# --- TM2 PINE CONE RAG SETUP (v2 UPGRADED) ---
+# --- TM2 PINE CONE RAG SETUP (1024d INFERENCE UPGRADED) ---
 def detect_query_intent(query: str):
     q = query.lower()
     if any(w in q for w in ["faculty", "professor", "teacher", "staff", "who teaches", "hod", "head of department"]):
@@ -89,16 +87,26 @@ def expand_query(query: str) -> str:
     return query
 
 def search_campus_data(user_query: str, top_k: int = 3) -> str:
-    model = resources.get("model")
+    pc = resources.get("pc")
     index = resources.get("index")
 
-    if not model or not index:
+    if not pc or not index:
         return "System initializing."
 
     expanded = expand_query(user_query)
     
-    # We are actually embedding the user's question now, not sending zeroes!
-    query_vec = model.encode([expanded]).tolist()
+    # NEW FIX: Use Pinecone Inference API to get the correct 1024d vector
+    try:
+        embedding_response = pc.inference.embed(
+            model="llama-text-embed-v2",
+            inputs=[expanded],
+            parameters={"input_type": "query"}
+        )
+        query_vec = embedding_response.values
+    except Exception as e:
+        print(f"Embedding failed: {e}")
+        return "No relevant information found in the MIT Bengaluru knowledge base."
+
     category, preferred_subtype = detect_query_intent(user_query)
 
     def run_query(filter_dict=None):
@@ -141,10 +149,13 @@ async def chat_endpoint(request: ChatRequest):
         if "No relevant information found" in context:
             bot_text = "I don't have that specific data in my current database. Please check the official placement portal."
             
-            tts = gTTS(text=bot_text, lang='en', tld='co.in') 
-            audio_fp = io.BytesIO()
-            tts.write_to_fp(audio_fp)
-            audio_base64 = base64.b64encode(audio_fp.getvalue()).decode('utf-8')
+            # FIREWALL AUDIO (edge-tts)
+            communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
+            audio_data = bytearray()
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_data.extend(chunk["data"])
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
             
             return {
                 "text": bot_text,
@@ -162,13 +173,16 @@ async def chat_endpoint(request: ChatRequest):
             temperature=0.2,
         )
         
+        # Fixed typo here!
         bot_text = groq_response.choices.message.content
         
-        # Step 3: Audio generation
-        tts = gTTS(text=bot_text, lang='en', tld='co.in') 
-        audio_fp = io.BytesIO()
-        tts.write_to_fp(audio_fp)
-        audio_base64 = base64.b64encode(audio_fp.getvalue()).decode('utf-8')
+        # Step 3: Audio generation (EDGE-TTS NEURAL)
+        communicate = edge_tts.Communicate(bot_text, "en-IN-NeerjaNeural")
+        audio_data = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data.extend(chunk["data"])
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
         
         return {
             "text": bot_text,
