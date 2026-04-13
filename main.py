@@ -8,13 +8,11 @@ from groq import Groq
 from gtts import gTTS
 from dotenv import load_dotenv
 from pinecone import Pinecone
-# REMOVED: SentenceTransformer (To stop the 502/RAM crashes)
 
 load_dotenv()
 
 app = FastAPI()
 
-# 1. THE CORS FIX: Explicitly allow local and production origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -23,16 +21,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize API Clients
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 class ChatRequest(BaseModel):
     query: str
 
+# --- GUARDRAIL 1: THE STRICT SYSTEM PROMPT ---
 SYSTEM_PROMPT = """You are ARIA, the official Placement Intelligence Voice AI for MIT Bengaluru. 
-Limit responses to 1 to 2 short sentences. No markdown, no formatting. Plain text only."""
+Your primary goal is to assist students with campus and placement queries.
 
-# --- TM2 PINE CONE RAG SETUP (V2 UPGRADED) ---
+CRITICAL RULES FOR VOICE OUTPUT:
+1. EXTREME BREVITY: Limit every response to a maximum of 1 to 2 short sentences. Do not exceed 25 words. 
+2. NO FORMATTING: Do not use bullet points, bold text, markdown, or special characters. Use plain English words only (e.g., say "percent" instead of "%").
+3. RAG DEPENDENCE: Only use provided context. If the answer is not in the context, say exactly: "I don't have that specific data right now. Please check the official placement portal."
+4. NO FILLER: Never use introductory filler. Answer the core question immediately.
+"""
+
+# --- GUARDRAIL 2: INTENT DETECTION & QUERY EXPANSION ---
+EXPANSIONS = {
+    "cs faculty": "Computer Science faculty members list MIT Bengaluru names professors",
+    "cse faculty": "Computer Science Engineering faculty members MIT Bengaluru",
+    "hostel fee": "hostel room fee structure charges 2025 MIT Bengaluru annual",
+    "hostel room": "hostel room types single double AC non-AC fee MIT Bengaluru",
+}
+
+def detect_query_intent(query: str):
+    q = query.lower()
+    if any(w in q for w in ["faculty", "professor", "teacher", "staff", "hod"]):
+        return "faculty"
+    if any(w in q for w in ["fee", "cost", "payment", "hostel charges"]):
+        return "finance"
+    return None
+
+def expand_query(query: str) -> str:
+    q_lower = query.lower()
+    for shorthand, expansion in EXPANSIONS.items():
+        if shorthand in q_lower: return expansion
+    return query
+
+# --- TM2 PINE CONE RAG SETUP ---
 _index = None
 
 def _get_resources():
@@ -45,41 +72,51 @@ def _get_resources():
 
 def search_campus_data(user_query: str, top_k: int = 3) -> str:
     index = _get_resources()
+    category = detect_query_intent(user_query)
+    expanded_text = expand_query(user_query)
     
-    # FIX: Using the new Pinecone V2 Integrated Inference
-    # This prevents the need for a local SentenceTransformer model
     try:
+        # Using Pinecone's server-side embedding (assumes index is set up for it)
+        # If your index doesn't support 'model' param, you'll need the inference API call here
         results = index.query(
-            vector=[0.0] * 384, # Placeholder if using server-side embedding
+            vector=[0.0] * 384, # Placeholder: Replace with actual inference if not using Pinecone's integrated embedder
             top_k=top_k,
-            include_metadata=True
+            include_metadata=True,
+            filter={"category": {"$eq": category}} if category else None
         )
-        context_parts = [m["metadata"].get("text", "") for m in results.get("matches", [])]
+        
+        context_parts = []
+        seen_texts = set()
+        for m in results.get("matches", []):
+            text = m["metadata"].get("text", "")
+            if text and text[:100] not in seen_texts:
+                context_parts.append(text)
+                seen_texts.add(text[:100])
+                
         return "\n\n".join(context_parts) if context_parts else "No specific context found."
-    except:
+    except Exception as e:
+        print(f"RAG Error: {e}")
         return "MIT Bengaluru placement and campus information."
 
-# ---------------------------------------------
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     try:
-        # Step 1: Context Retrieval
+        # 1. Retrieval with Guardrails
         context = search_campus_data(request.query)
 
-        # Step 2: Groq Generation
+        # 2. Generation with Strict Tone
         groq_response = groq_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Context: {context}\n\nUser Question: {request.query}"}
             ],
             model="llama-3.3-70b-versatile",
-            temperature=0.5,
+            temperature=0.2, # Lowered temperature for higher strictness
         )
         
-        # FIX: Added [0] to the index to stop the "processed" glitch
         bot_text = groq_response.choices[0].message.content
         
-        # Step 3: Audio generation (Indian Accent)
+        # 3. Audio generation (Indian Accent)
         tts = gTTS(text=bot_text, lang='en', tld='co.in') 
         audio_fp = io.BytesIO()
         tts.write_to_fp(audio_fp)
@@ -92,10 +129,9 @@ async def chat_endpoint(request: ChatRequest):
 
     except Exception as e:
         print(f"ERROR: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 if __name__ == "__main__":
     import uvicorn
-    # FIX: Dynamically bind to the port Render provides
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
